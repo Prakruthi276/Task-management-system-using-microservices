@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/AppError";
 import { Role, UserStatus } from "../types/user.types";
-import { CreateUserInput, ListUsersQuery } from "../validators/user.validator";
+import { CreateUserInput, ListUsersQuery, VerifyCredentialsInput } from "../validators/user.validator";
 
 // passwordHash is never selected, so it can never leak in a response
 const safeUserSelect = {
@@ -17,6 +17,23 @@ const safeUserSelect = {
 } as const;
 
 const SALT_ROUNDS = 10;
+
+// The system must never end up with no active admin.
+const assertNotRemovingLastAdmin = async (
+  target: { id: string; role: Role; status: UserStatus },
+  change: { role?: Role; status?: UserStatus }
+) => {
+  const losesAdmin =
+    target.role === "ADMIN" &&
+    target.status === "ACTIVE" &&
+    ((change.role !== undefined && change.role !== "ADMIN") || change.status === "INACTIVE");
+  if (!losesAdmin) return;
+
+  const otherAdmins = await prisma.user.count({
+    where: { role: "ADMIN", status: "ACTIVE", id: { not: target.id } },
+  });
+  if (otherAdmins === 0) throw new AppError("Cannot remove the last active admin", 409);
+};
 
 export const userService = {
   async create(input: CreateUserInput) {
@@ -64,6 +81,22 @@ export const userService = {
     };
   },
 
+  // Names only, for dropdowns and for showing who a task is assigned to
+  async getDirectory({ page, limit, status }: ListUsersQuery) {
+    const where = { status };
+    const [users, total] = await prisma.$transaction([
+      prisma.user.findMany({
+        where,
+        select: { id: true, name: true },
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { name: "asc" },
+      }),
+      prisma.user.count({ where }),
+    ]);
+    return { users, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  },
+
   async getById(id: string) {
     const user = await prisma.user.findUnique({ where: { id }, select: safeUserSelect });
     if (!user) throw new AppError("User not found", 404);
@@ -71,13 +104,29 @@ export const userService = {
   },
 
   async update(id: string, data: { name?: string; role?: Role }) {
-    await userService.getById(id);
+    const user = await userService.getById(id);
+    await assertNotRemovingLastAdmin(user, { role: data.role });
     return prisma.user.update({ where: { id }, data, select: safeUserSelect });
   },
 
   async updateStatus(id: string, status: UserStatus) {
     const user = await userService.getById(id);
     if (user.status === status) throw new AppError(`User is already ${status}`, 400);
+    await assertNotRemovingLastAdmin(user, { status });
     return prisma.user.update({ where: { id }, data: { status }, select: safeUserSelect });
+  },
+
+  // Called by the auth-service at login time. Checks the password and returns the safe user.
+  // Both wrong email and wrong password return the same 401 to prevent user enumeration.
+  async verifyCredentials({ email, password }: VerifyCredentialsInput) {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw new AppError("Invalid email or password", 401);
+
+    const valid = await bcrypt.compare(password, user.passwordHash);
+    if (!valid) throw new AppError("Invalid email or password", 401);
+
+    // Return the safe shape — passwordHash never leaves this service
+    const { passwordHash: _, ...safeUser } = user;
+    return safeUser;
   },
 };

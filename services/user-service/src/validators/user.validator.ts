@@ -32,5 +32,11 @@ export const listUsersQuerySchema = z.object({
   status: z.enum(USER_STATUSES).optional(),
 });
 
+export const verifyCredentialsSchema = z.object({
+  email: z.string().trim().toLowerCase().email("Invalid email address"),
+  password: z.string().min(1, "Password is required"),
+});
+
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
+export type VerifyCredentialsInput = z.infer<typeof verifyCredentialsSchema>;

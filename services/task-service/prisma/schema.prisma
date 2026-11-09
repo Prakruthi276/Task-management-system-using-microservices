@@ -29,10 +29,12 @@ model Task {
   priority    TaskPriority @default(MEDIUM)
   status      TaskStatus   @default(TODO)
   assigneeId  String?
+  createdBy   String?
   dueDate     DateTime?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
   @@index([status])
   @@index([assigneeId])
+  @@index([createdBy])
 }
